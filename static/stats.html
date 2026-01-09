@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>数据统计 - 包子店</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+</head>
+
+<body>
+    <div id="login-overlay" style="display: none;">
+        <div id="login-box">
+            <h2>前台登录</h2>
+            <p>查看统计需要前台密码（默认 front123，可在环境变量 FRONT_PASSWORD 修改）</p>
+            <input id="pwd" type="password" placeholder="输入密码" />
+            <button id="login-btn">登录</button>
+            <div id="login-error" class="alert" style="display:none;"></div>
+        </div>
+    </div>
+
+    <header>
+        <h1>数据统计</h1>
+        <div class="controls">
+            <button class="btn-ghost" id="go-home">回到点单</button>
+            <button class="btn-ghost" id="refresh">刷新</button>
+        </div>
+    </header>
+
+    <div class="layout stats-layout">
+        <section class="panel">
+            <h2>收入概览</h2>
+            <div class="card-grid">
+                <div class="stat-card">
+                    <div class="muted">今日收入</div>
+                    <div class="big" id="today-total">--</div>
+                    <div class="muted" id="today-orders">-- 单</div>
+                </div>
+                <div class="stat-card">
+                    <div class="muted">本周收入（含今日）</div>
+                    <div class="big" id="week-total">--</div>
+                    <div class="muted" id="week-orders">-- 单</div>
+                </div>
+            </div>
+        </section>
+
+        <section class="panel">
+            <h2>最近 7 天收入</h2>
+            <div class="table" id="days-table"></div>
+        </section>
+
+        <section class="panel">
+            <h2>菜品销量</h2>
+            <div class="table" id="items-table"></div>
+        </section>
+    </div>
+
+    <footer>
+        <span>统计基于已完成订单。</span>
+    </footer>
+
+    <script>
+        const apiBase = '';
+        let token = localStorage.getItem('front_token') || '';
+        const el = (id) => document.getElementById(id);
+
+        const showLogin = () => el('login-overlay').style.display = 'flex';
+        const hideLogin = () => el('login-overlay').style.display = 'none';
+
+        async function callApi(path, options = {}) {
+            const headers = options.headers || {};
+            if (token) headers['Authorization'] = `Bearer ${token}`;
+            const res = await fetch(apiBase + path, { ...options, headers });
+            if (!res.ok) throw new Error(await res.text());
+            return res.json();
+        }
+
+        function renderOverview(data) {
+            const today = data.today || { total: 0, orders: 0 };
+            const week = data.week || { total: 0, orders: 0 };
+            el('today-total').textContent = `￥${today.total?.toFixed ? today.total.toFixed(2) : today.total}`;
+            el('today-orders').textContent = `${today.orders || 0} 单`;
+            el('week-total').textContent = `￥${week.total?.toFixed ? week.total.toFixed(2) : week.total}`;
+            el('week-orders').textContent = `${week.orders || 0} 单`;
+
+            const daysBox = el('days-table');
+            const days = data.days || [];
+            daysBox.innerHTML = `
+                <div class="table-row table-head"><div>日期</div><div>收入</div><div>订单数</div></div>
+                ${days.map(d => `<div class="table-row"><div>${d.date}</div><div>￥${(d.total || 0).toFixed(2)}</div><div>${d.orders || 0}</div></div>`).join('')}
+            `;
+
+            const itemsBox = el('items-table');
+            const items = (data.items || []).sort((a, b) => b.quantity - a.quantity);
+            if (!items.length) {
+                itemsBox.innerHTML = '<div class="muted">暂无已完成订单</div>';
+            } else {
+                itemsBox.innerHTML = `
+                    <div class="table-row table-head"><div>菜品</div><div>销量</div><div>收入</div></div>
+                    ${items.map(i => `<div class="table-row"><div>${i.name}</div><div>${i.quantity}</div><div>￥${(i.revenue || 0).toFixed(2)}</div></div>`).join('')}
+                `;
+            }
+        }
+
+        async function fetchStats() {
+            const data = await callApi('/api/stats/overview');
+            renderOverview(data);
+        }
+
+        async function login() {
+            const pwd = el('pwd').value.trim();
+            if (!pwd) return;
+            el('login-error').style.display = 'none';
+            try {
+                const res = await callApi('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ role: 'front', password: pwd })
+                });
+                token = res.token;
+                localStorage.setItem('front_token', token);
+                hideLogin();
+                await fetchStats();
+            } catch (err) {
+                el('login-error').textContent = '登录失败，请检查密码';
+                el('login-error').style.display = 'block';
+            }
+        }
+
+        el('login-btn').onclick = login;
+        el('refresh').onclick = fetchStats;
+        el('go-home').onclick = () => { window.location.href = '/'; };
+
+        (async () => {
+            if (!token) {
+                showLogin();
+            } else {
+                try {
+                    await fetchStats();
+                } catch (e) {
+                    console.warn(e);
+                    showLogin();
+                }
+            }
+        })();
+    </script>
+</body>
+
+</html>

@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>前台点单 - 包子店</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+</head>
+
+<body>
+    <div id="login-overlay" style="display: none;">
+        <div id="login-box">
+            <h2>前台登录</h2>
+            <p>前台密码（默认 front123，可在环境变量 FRONT_PASSWORD 修改）</p>
+            <input id="pwd" type="password" placeholder="输入密码" />
+            <button id="login-btn">登录</button>
+            <div id="login-error" class="alert" style="display:none;"></div>
+        </div>
+    </div>
+
+    <header>
+        <h1>前台点单</h1>
+        <div class="controls">
+            <button id="submit-order" disabled>提交订单</button>
+            <button class="btn-ghost" id="new-draft">新建草稿</button>
+            <button class="btn-ghost" id="refresh">刷新</button>
+            <button class="btn-ghost" id="open-stats">统计看板</button>
+            <span class="stat-chip" id="stats">今日收入：--</span>
+        </div>
+    </header>
+
+    <div class="layout">
+        <section class="panel">
+            <h2>当前订单</h2>
+            <div class="order-list" id="order-list"></div>
+        </section>
+        <section class="panel">
+            <h2>点菜区</h2>
+            <div class="menu-grid" id="menu"></div>
+            <div class="draft-card" id="draft-box">
+                <div class="draft-header">
+                    <div>
+                        <strong>草稿订单</strong>
+                        <span class="pill muted" id="draft-total">0 项</span>
+                    </div>
+                    <div class="controls">
+                        <button class="btn-ghost" id="clear-draft" disabled>清空草稿</button>
+                    </div>
+                </div>
+                <div id="draft-items" class="draft-items muted">还没有菜品，先在上面点菜再提交</div>
+            </div>
+            <div style="margin-top: 12px;">
+                <textarea id="note" placeholder="备注（可选，草稿时将随提交一起带上）"></textarea>
+            </div>
+        </section>
+    </div>
+
+    <footer>
+        <span>点击菜品自动 +1，长按或使用 - 按钮减少。订单完成后点击“完成”。</span>
+    </footer>
+
+    <script>
+        const apiBase = '';
+        let token = localStorage.getItem('front_token') || '';
+        let orders = [];
+        let selectedId = null;
+        let menu = [];
+        let ws = null;
+        let draft = { items: {}, note: '' };
+
+        const el = (id) => document.getElementById(id);
+
+        const showLogin = () => el('login-overlay').style.display = 'flex';
+        const hideLogin = () => el('login-overlay').style.display = 'none';
+
+        async function callApi(path, options = {}) {
+            const headers = options.headers || {};
+            if (token) headers['Authorization'] = `Bearer ${token}`;
+            const res = await fetch(apiBase + path, { ...options, headers });
+            if (!res.ok) {
+                const msg = await res.text();
+                throw new Error(msg || '请求失败');
+            }
+            const text = await res.text();
+            try { return JSON.parse(text); } catch { return text; }
+        }
+
+        function upsertOrder(order) {
+            const idx = orders.findIndex((o) => o.id === order.id);
+            if (idx >= 0) orders[idx] = order; else orders.unshift(order);
+            renderOrders();
+        }
+
+        function renderOrders() {
+            const list = el('order-list');
+            list.innerHTML = '';
+            const openOrders = orders.filter(o => o.status === 'open');
+            const history = orders.filter(o => o.status !== 'open');
+
+            const buildCard = (o) => {
+                const card = document.createElement('div');
+                card.className = 'order-card' + (o.id === selectedId ? ' selected' : '');
+                const badgeClass = o.status === 'open' ? 'open' : o.status === 'completed' ? 'completed' : 'cancelled';
+                card.innerHTML = `
+          <div class="order-meta">
+            <div>单号 #${o.id} · ￥${o.total.toFixed(2)}</div>
+            <div class="badge ${badgeClass}">${o.status}</div>
+          </div>
+          <div>
+            ${o.items.map(it => `
+              <div class="item-line">
+                <span>${it.name}</span>
+                <div class="item-actions">
+                  <span class="pill muted">× ${it.quantity}</span>
+                  ${o.status === 'open' ? `
+                  <button class="btn-ghost" data-act="dec" data-oid="${o.id}" data-iid="${it.id}">-</button>
+                  <button class="btn-ghost" data-act="inc" data-oid="${o.id}" data-iid="${it.id}">+</button>` : ''}
+                </div>
+              </div>
+            `).join('') || '<span style="color: var(--muted);">暂无菜品</span>'}
+          </div>
+          <div class="controls">
+            <button class="btn-ghost" data-act="select" data-oid="${o.id}">选中</button>
+            ${o.status === 'open' ? `<button class="btn-success" data-act="done" data-oid="${o.id}">完成</button>
+            <button class="btn-danger" data-act="cancel" data-oid="${o.id}">取消</button>` : ''}
+          </div>
+        `;
+                return card;
+            };
+
+            openOrders.forEach(o => list.appendChild(buildCard(o)));
+
+            if (history.length) {
+                const wrap = document.createElement('details');
+                wrap.className = 'history';
+                wrap.innerHTML = `<summary>已完成/取消 (${history.length})</summary>`;
+                history.forEach(o => wrap.appendChild(buildCard(o)));
+                list.appendChild(wrap);
+            }
+        }
+
+        function draftCount(key) {
+            return draft.items[key] || 0;
+        }
+
+        function renderMenu() {
+            const box = el('menu');
+            box.innerHTML = '';
+            menu.forEach(item => {
+                const btn = document.createElement('button');
+                btn.className = 'menu-btn';
+                const count = selectedId ? 0 : draftCount(item.key);
+                btn.innerHTML = `${item.name} <span class="muted">￥${item.price}</span>${count ? `<span class="pill">${count}</span>` : ''}`;
+                btn.onclick = () => handleAdd(item.key);
+                box.appendChild(btn);
+            });
+        }
+
+        function renderDraft() {
+            const items = Object.entries(draft.items);
+            const box = el('draft-items');
+            const total = items.reduce((s, [, q]) => s + q, 0);
+            el('draft-total').textContent = `${total} 项`;
+            el('clear-draft').disabled = items.length === 0;
+            el('submit-order').disabled = items.length === 0;
+            if (!items.length) {
+                box.classList.add('muted');
+                box.innerHTML = '还没有菜品，先在上面点菜再提交';
+                return;
+            }
+            box.classList.remove('muted');
+            box.innerHTML = items.map(([key, qty]) => {
+                const item = menu.find(m => m.key === key);
+                const name = item?.name || key;
+                return `
+          <div class="draft-line">
+            <span>${name}</span>
+            <div class="item-actions">
+              <button class="btn-ghost" data-dkey="${key}" data-act="d-dec">-</button>
+              <span class="pill">${qty}</span>
+              <button class="btn-ghost" data-dkey="${key}" data-act="d-inc">+</button>
+            </div>
+          </div>`;
+            }).join('');
+        }
+
+        async function fetchMenu() {
+            menu = await callApi('/api/menu');
+            renderMenu();
+            renderDraft();
+        }
+
+        async function fetchOrders() {
+            orders = await callApi('/api/orders');
+            renderOrders();
+        }
+
+        async function fetchStats() {
+            try {
+                const s = await callApi('/api/stats/summary?days=1');
+                el('stats').textContent = `今日收入：￥${s.total}（${s.orders} 单）`;
+            } catch (e) {
+                console.warn(e);
+            }
+        }
+
+        async function login() {
+            const pwd = el('pwd').value.trim();
+            if (!pwd) return;
+            el('login-error').style.display = 'none';
+            try {
+                const res = await callApi('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ role: 'front', password: pwd })
+                });
+                token = res.token;
+                localStorage.setItem('front_token', token);
+                hideLogin();
+                await initData();
+                connectWS();
+            } catch (err) {
+                el('login-error').textContent = '登录失败，请检查密码';
+                el('login-error').style.display = 'block';
+            }
+        }
+
+        async function initData() {
+            await fetchMenu();
+            await fetchOrders();
+            await fetchStats();
+            renderDraft();
+        }
+
+        function addToDraft(key, delta = 1) {
+            const next = (draft.items[key] || 0) + delta;
+            if (next <= 0) delete draft.items[key]; else draft.items[key] = next;
+            renderDraft();
+            renderMenu();
+        }
+
+        async function handleAdd(key) {
+            if (!selectedId) {
+                addToDraft(key, 1);
+                return;
+            }
+            const res = await callApi(`/api/orders/${selectedId}/items`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ key, quantity: 1 })
+            });
+            upsertOrder(res);
+        }
+
+        async function updateItemQty(orderId, itemId, delta) {
+            const order = orders.find(o => o.id === orderId);
+            const item = order?.items.find(i => i.id === itemId);
+            if (!item) return;
+            const next = item.quantity + delta;
+            const res = await callApi(`/api/orders/${orderId}/items/${itemId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ quantity: next })
+            });
+            upsertOrder(res);
+        }
+
+        async function setOrderStatus(orderId, status) {
+            const res = await callApi(`/api/orders/${orderId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status })
+            });
+            upsertOrder(res);
+        }
+
+        async function submitDraft() {
+            const items = Object.entries(draft.items).map(([key, quantity]) => ({ key, quantity }));
+            if (!items.length) {
+                alert('请先选菜再提交');
+                return;
+            }
+            const payload = { note: draft.note, items };
+            const res = await callApi('/api/orders', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            selectedId = res.id;
+            draft = { items: {}, note: '' };
+            el('note').value = '';
+            upsertOrder(res);
+            renderDraft();
+            renderMenu();
+        }
+
+        function clearDraft() {
+            draft = { items: {}, note: '' };
+            if (!selectedId) el('note').value = '';
+            renderDraft();
+            renderMenu();
+        }
+
+        function connectWS() {
+            if (!token) return;
+            const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+            ws = new WebSocket(`${proto}://${location.host}/ws?token=${token}`);
+            ws.onmessage = (ev) => {
+                try {
+                    const msg = JSON.parse(ev.data);
+                    if (msg.type === 'order_updated' && msg.order) {
+                        upsertOrder(msg.order);
+                        if (msg.order.id === selectedId) {
+                            el('note').value = msg.order.note || '';
+                        }
+                    }
+                } catch (e) { console.warn(e); }
+            };
+            ws.onclose = () => setTimeout(connectWS, 3000);
+        }
+
+        el('login-btn').onclick = login;
+        el('submit-order').onclick = submitDraft;
+        el('clear-draft').onclick = clearDraft;
+        el('new-draft').onclick = () => {
+            selectedId = null;
+            el('note').value = draft.note || '';
+            renderOrders();
+            renderMenu();
+        };
+        el('open-stats').onclick = () => { window.location.href = '/stats'; };
+        el('refresh').onclick = () => { fetchOrders(); fetchStats(); };
+
+        el('order-list').addEventListener('click', (e) => {
+            const btn = e.target.closest('button');
+            if (!btn) return;
+            const act = btn.dataset.act;
+            const oid = Number(btn.dataset.oid);
+            const iid = Number(btn.dataset.iid);
+            if (act === 'select') {
+                selectedId = oid;
+                const order = orders.find(o => o.id === oid);
+                el('note').value = order?.note || '';
+                renderOrders();
+                renderMenu();
+            }
+            if (act === 'inc') updateItemQty(oid, iid, 1);
+            if (act === 'dec') updateItemQty(oid, iid, -1);
+            if (act === 'done') setOrderStatus(oid, 'completed');
+            if (act === 'cancel') setOrderStatus(oid, 'cancelled');
+        });
+
+        el('draft-items').addEventListener('click', (e) => {
+            const btn = e.target.closest('button');
+            if (!btn) return;
+            const key = btn.dataset.dkey;
+            const act = btn.dataset.act;
+            if (act === 'd-inc') addToDraft(key, 1);
+            if (act === 'd-dec') addToDraft(key, -1);
+        });
+
+        el('note').addEventListener('input', () => {
+            if (!selectedId) draft.note = el('note').value;
+        });
+
+        el('note').addEventListener('change', async () => {
+            if (!selectedId) return;
+            const note = el('note').value;
+            const res = await callApi(`/api/orders/${selectedId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ note })
+            });
+            upsertOrder(res);
+        });
+
+        // Startup
+        (async () => {
+            if (!token) {
+                showLogin();
+            } else {
+                try {
+                    await initData();
+                    connectWS();
+                } catch (e) {
+                    console.warn('token invalid, re-login');
+                    showLogin();
+                }
+            }
+        })();
+    </script>
+</body>
+
+</html>

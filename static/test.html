@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <title>语音播放诊断</title>
+    <style>
+        body {
+            font-family: system-ui;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            gap: 20px;
+            background: #fdfdfd;
+        }
+
+        button {
+            padding: 15px 40px;
+            font-size: 20px;
+            cursor: pointer;
+            background: #ff4757;
+            color: white;
+            border: none;
+            border-radius: 12px;
+        }
+
+        #log {
+            font-family: monospace;
+            font-size: 12px;
+            color: #666;
+            background: #eee;
+            padding: 10px;
+            border-radius: 5px;
+            max-width: 80%;
+        }
+    </style>
+</head>
+
+<body>
+
+    <button onclick="play()">播放中文测试</button>
+    <div id="log">等待操作...</div>
+
+    <script>
+        function log(msg) {
+            document.getElementById('log').innerText += "\n" + msg;
+            console.log(msg);
+        }
+
+        function play() {
+            const text = "你好，现在你应该能听到声音了。";
+            // 换一个更简洁的接口：谷歌翻译接口（备用）
+            const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(text)}&tl=zh-CN&client=tw-ob`;
+
+            const audio = new Audio();
+
+            audio.oncanplaythrough = () => {
+                log("音频加载成功，尝试播放...");
+                audio.play().catch(e => log("播放被拦截: " + e.message));
+            };
+
+            audio.onerror = () => {
+                log("当前接口无法访问，尝试自动切换到备用接口...");
+                // 如果第一个不行，切回百度接口
+                audio.src = `https://tts.baidu.com/text2audio?lan=zh&ie=UTF-8&text=${encodeURIComponent(text)}`;
+            };
+
+            log("正在请求音频数据...");
+            audio.src = url;
+        }
+    </script>
+</body>
+
+</html>

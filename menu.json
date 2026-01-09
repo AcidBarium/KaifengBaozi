@@ -1,0 +1,52 @@
+[
+    {
+        "key": "guantangbao",
+        "name": "灌汤包",
+        "price": 7.0
+    },
+    {
+        "key": "jidan_tang",
+        "name": "鸡蛋汤",
+        "price": 3.0
+    },
+    {
+        "key": "xiaomi_zhou",
+        "name": "小米粥",
+        "price": 2.0
+    },
+    {
+        "key": "heimi_zhou",
+        "name": "黑米粥",
+        "price": 2.0
+    },
+    {
+        "key": "doujiang",
+        "name": "豆浆",
+        "price": 2.0
+    },
+    {
+        "key": "chajidan",
+        "name": "茶鸡蛋",
+        "price": 1.0
+    },
+    {
+        "key": "youmo",
+        "name": "油馍",
+        "price": 4.0
+    },
+    {
+        "key": "caibing",
+        "name": "菜饼",
+        "price": 4.0
+    },
+    {
+        "key": "jianbing",
+        "name": "煎饼",
+        "price": 3.0
+    },
+    {
+        "key": "jianjidan",
+        "name": "煎鸡蛋",
+        "price": 1.5
+    }
+]

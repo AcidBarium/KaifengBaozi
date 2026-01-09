@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>后厨展示 - 包子店</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+</head>
+
+<body class="kitchen-page">
+    <div id="login-overlay" style="display: none;">
+        <div id="login-box">
+            <h2>后厨登录</h2>
+            <p>后厨密码（默认 kitchen123，可在环境变量 KITCHEN_PASSWORD 修改）</p>
+            <input id="pwd" type="password" placeholder="输入密码" />
+            <button id="login-btn">登录</button>
+            <div id="login-error" class="alert" style="display:none;"></div>
+        </div>
+    </div>
+
+    <header>
+        <h1>后厨出餐屏</h1>
+        <div class="controls">
+            <button class="btn-ghost" id="refresh">刷新</button>
+            <button class="btn-ghost" id="test-voice">测试播报</button>
+        </div>
+    </header>
+
+    <div class="layout" style="grid-template-columns: 1fr;">
+        <section class="panel">
+            <h2>待做菜品</h2>
+            <div id="orders-open" class="order-list kitchen-grid"></div>
+            <h2 class="sub-title">已完成 / 取消</h2>
+            <div id="orders-done" class="order-list kitchen-grid"></div>
+        </section>
+    </div>
+
+    <footer>
+        <span>新订单或修改会自动语音播报。</span>
+    </footer>
+
+    <script>
+        let token = localStorage.getItem('kitchen_token') || '';
+        let orders = [];
+        let ws = null;
+        let voiceReady = false;
+        let cachedVoices = [];
+
+        const el = (id) => document.getElementById(id);
+
+        function loadVoices() {
+            if (!('speechSynthesis' in window)) return [];
+            const voices = window.speechSynthesis.getVoices();
+            if (voices && voices.length) cachedVoices = voices;
+            return cachedVoices;
+        }
+
+        function pickVoice() {
+            const voices = loadVoices();
+            const zh = voices.find(v => v.lang && v.lang.toLowerCase().startsWith('zh'));
+            return zh || voices[0] || null;
+        }
+
+        let audioPlayer = null;
+
+        async function speak(text) {
+            if (!text) return;
+            try {
+                // 先走服务器本地 TTS，避免外网依赖
+                const res = await fetch(`/api/tts?text=${encodeURIComponent(text)}`);
+                if (!res.ok) throw new Error('tts http error');
+                const blob = await res.blob();
+                const url = URL.createObjectURL(blob);
+                playUrl(url, true);
+            } catch (e) {
+                console.warn('local tts failed, fallback to browser', e);
+                if ('speechSynthesis' in window) {
+                    const voice = pickVoice();
+                    const utter = new SpeechSynthesisUtterance(text);
+                    if (voice) utter.voice = voice;
+                    utter.lang = 'zh-CN';
+                    utter.rate = 1;
+                    window.speechSynthesis.speak(utter);
+                }
+            }
+        }
+
+        function playUrl(url, revokeAfter = false) {
+            try {
+                if (audioPlayer) {
+                    audioPlayer.pause();
+                    audioPlayer = null;
+                }
+                audioPlayer = new Audio();
+                audioPlayer.src = url;
+                audioPlayer.autoplay = true;
+                audioPlayer.oncanplaythrough = () => {
+                    audioPlayer.play().catch((e) => console.warn('play blocked', e));
+                };
+                audioPlayer.onended = () => {
+                    if (revokeAfter) URL.revokeObjectURL(url);
+                };
+                audioPlayer.onerror = (err) => {
+                    console.warn('audio play error', err);
+                };
+            } catch (e) {
+                console.warn('tts error', e);
+            }
+        }
+
+        function warmUpSpeech() {
+            try {
+                // Short silent utterance to unlock audio after a user click
+                const u = new SpeechSynthesisUtterance('');
+                window.speechSynthesis.speak(u);
+                voiceReady = true;
+            } catch (e) { console.warn(e); }
+        }
+
+        window.speechSynthesis?.addEventListener('voiceschanged', loadVoices);
+
+        const showLogin = () => el('login-overlay').style.display = 'flex';
+        const hideLogin = () => el('login-overlay').style.display = 'none';
+
+        async function callApi(path, options = {}) {
+            const headers = options.headers || {};
+            if (token) headers['Authorization'] = `Bearer ${token}`;
+            const res = await fetch(path, { ...options, headers });
+            if (!res.ok) throw new Error(await res.text());
+            return res.json();
+        }
+
+        function render() {
+            const openBox = el('orders-open');
+            const doneBox = el('orders-done');
+            openBox.innerHTML = '';
+            doneBox.innerHTML = '';
+            const openOrders = orders.filter(o => o.status === 'open');
+            const others = orders.filter(o => o.status !== 'open');
+            const buildCard = (o) => {
+                const badgeClass = o.status === 'open' ? 'open' : o.status === 'completed' ? 'completed' : 'cancelled';
+                const card = document.createElement('div');
+                card.className = 'order-card kitchen-card';
+                card.innerHTML = `
+          <div class="order-meta">
+            <div>单号 #${o.id} · ￥${o.total.toFixed(2)}</div>
+            <div class="badge ${badgeClass}">${o.status}</div>
+          </div>
+                    <div class="kitchen-items">
+                        ${o.items.map(it => `<div class="kitchen-chip"><span class="k-name">${it.name}</span><span class="pill k-qty">× ${it.quantity}</span></div>`).join('') || '<span style="color: var(--muted);">暂无菜品</span>'}
+                    </div>
+                    ${o.note ? `<div class="pill" style="background: #fff7e6; color: var(--warning);">备注：${o.note}</div>` : ''}
+        `;
+                return card;
+            };
+            if (!openOrders.length) {
+                openBox.innerHTML = '<div class="muted">暂无待做订单</div>';
+            } else {
+                openOrders.forEach(o => openBox.appendChild(buildCard(o)));
+            }
+
+            if (!others.length) {
+                doneBox.innerHTML = '<div class="muted">暂无已完成或取消订单</div>';
+            } else {
+                others.forEach(o => doneBox.appendChild(buildCard(o)));
+            }
+        }
+
+        function upsert(order) {
+            const idx = orders.findIndex(o => o.id === order.id);
+            if (idx >= 0) orders[idx] = order; else orders.unshift(order);
+            render();
+        }
+
+        async function fetchOrders() {
+            orders = await callApi('/api/orders');
+            render();
+        }
+
+        async function login() {
+            warmUpSpeech();
+            const pwd = el('pwd').value.trim();
+            if (!pwd) return;
+            try {
+                const res = await callApi('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ role: 'kitchen', password: pwd })
+                });
+                token = res.token;
+                localStorage.setItem('kitchen_token', token);
+                hideLogin();
+                await fetchOrders();
+                connectWS();
+            } catch (e) {
+                el('login-error').textContent = '登录失败，请检查密码';
+                el('login-error').style.display = 'block';
+            }
+        }
+
+        function connectWS() {
+            if (!token) return;
+            const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+            ws = new WebSocket(`${proto}://${location.host}/ws?token=${token}`);
+            ws.onmessage = (ev) => {
+                try {
+                    const msg = JSON.parse(ev.data);
+                    if (msg.type === 'order_updated' && msg.order) {
+                        upsert(msg.order);
+                        const text = buildSpeech(msg);
+                        if (text) speak(text);
+                    }
+                } catch (e) { console.warn(e); }
+            };
+            ws.onclose = () => setTimeout(connectWS, 3000);
+        }
+
+        function buildSpeech(msg) {
+            const o = msg.order;
+            if (!o) return '';
+            const items = o.items.map(it => `${it.name}${it.quantity}份`).join('，');
+            switch (msg.action) {
+                case 'created':
+                    return `新订单 ${o.id}，${items || '暂无菜品'}`;
+                case 'item_added':
+                case 'item_changed':
+                    return `订单 ${o.id} 更新，${items}`;
+                case 'status_changed':
+                    if (o.status === 'completed') return `订单 ${o.id} 完成`;
+                    if (o.status === 'cancelled') return `订单 ${o.id} 取消`;
+                    return '';
+                default:
+                    return '';
+            }
+        }
+
+        el('login-btn').onclick = login;
+        el('refresh').onclick = fetchOrders;
+        el('test-voice').onclick = () => {
+            warmUpSpeech();
+            speak('播报测试，欢迎光临');
+        };
+
+        (async () => {
+            if (!token) {
+                showLogin();
+            } else {
+                try {
+                    await fetchOrders();
+                    connectWS();
+                } catch (e) {
+                    showLogin();
+                }
+            }
+        })();
+    </script>
+</body>
+
+</html>
