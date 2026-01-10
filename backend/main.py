@@ -393,7 +393,11 @@ async def stats(
     db: Session = Depends(get_db),
     role: str = Depends(require_roles(["front"])),
 ):
-    since = now_local() - timedelta(days=days)
+    # Align with the stats dashboard: count from local-day start, not rolling 24h
+    safe_days = max(1, int(days))
+    now = now_local()
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    since = day_start - timedelta(days=safe_days - 1)
     q = db.query(func.sum(Order.total), func.count(Order.id)).filter(
         Order.status == "completed", Order.created_at >= since
     )
