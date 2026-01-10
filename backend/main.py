@@ -32,6 +32,12 @@ engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
+LOCAL_TZ_OFFSET = timedelta(hours=8)
+
+
+def now_local():
+    return datetime.utcnow() + LOCAL_TZ_OFFSET
+
 
 class Order(Base):
     __tablename__ = "orders"
@@ -40,8 +46,8 @@ class Order(Base):
     status = Column(String, default="open")  # open, completed, cancelled
     note = Column(String, nullable=True)
     total = Column(Float, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=now_local)
+    updated_at = Column(DateTime, default=now_local, onupdate=now_local)
 
     items = relationship("OrderItem", cascade="all, delete-orphan", back_populates="order")
 
@@ -387,7 +393,7 @@ async def stats(
     db: Session = Depends(get_db),
     role: str = Depends(require_roles(["front"])),
 ):
-    since = datetime.utcnow() - timedelta(days=days)
+    since = now_local() - timedelta(days=days)
     q = db.query(func.sum(Order.total), func.count(Order.id)).filter(
         Order.status == "completed", Order.created_at >= since
     )
@@ -400,7 +406,7 @@ async def stats_overview(
     db: Session = Depends(get_db),
     role: str = Depends(require_roles(["front"])),
 ):
-    now = datetime.utcnow()
+    now = now_local()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = today_start - timedelta(days=6)
 

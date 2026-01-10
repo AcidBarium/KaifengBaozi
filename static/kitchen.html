@@ -243,9 +243,6 @@
             switch (msg.action) {
                 case 'created':
                     return `新订单 ${no}，${items || '暂无菜品'}`;
-                case 'item_added':
-                case 'item_changed':
-                    return `订单 ${no} 更新，${items || '暂无菜品'}`;
                 case 'announce':
                     return `订单 ${no} 更新，${items || '暂无菜品'}`;
                 case 'status_changed':
