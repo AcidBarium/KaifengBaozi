@@ -69,6 +69,20 @@
 
         const el = (id) => document.getElementById(id);
 
+        const formatTime = (ts) => {
+            if (!ts) return '';
+            const iso = ts.endsWith('Z') ? ts : `${ts}Z`;
+            const d = new Date(iso);
+            return d.toLocaleString('zh-CN', {
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: false,
+                timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
+            });
+        };
+
         const showLogin = () => el('login-overlay').style.display = 'flex';
         const hideLogin = () => el('login-overlay').style.display = 'none';
 
@@ -101,11 +115,13 @@
                 card.className = 'order-card';
                 const no = o.display_no || o.id;
                 const badgeClass = o.status === 'open' ? 'open' : o.status === 'completed' ? 'completed' : 'cancelled';
+                const orderTime = o.status !== 'open' ? formatTime(o.created_at) : '';
                 card.innerHTML = `
           <div class="order-meta">
                         <div>单号 #${no} · ￥${o.total.toFixed(2)}</div>
             <div class="badge ${badgeClass}">${o.status}</div>
           </div>
+                    ${orderTime ? `<div class="muted" style="margin: 4px 0;">下单时间：${orderTime}</div>` : ''}
           <div>
             ${o.items.map(it => `
               <div class="item-line">
