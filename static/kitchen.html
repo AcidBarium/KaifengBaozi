@@ -9,15 +9,6 @@
 </head>
 
 <body class="kitchen-page">
-    <div id="login-overlay" style="display: none;">
-        <div id="login-box">
-            <h2>后厨登录</h2>
-            <p>后厨密码（默认 kitchen123，可在环境变量 KITCHEN_PASSWORD 修改）</p>
-            <input id="pwd" type="password" placeholder="输入密码" />
-            <button id="login-btn">登录</button>
-            <div id="login-error" class="alert" style="display:none;"></div>
-        </div>
-    </div>
 
     <header>
         <h1>后厨出餐屏</h1>
@@ -63,50 +54,79 @@
         }
 
         let audioPlayer = null;
+        let speechQueue = [];
+        let speaking = false;
+
+        function enqueueSpeech(text) {
+            if (!text) return;
+            speechQueue.push(text);
+            if (!speaking) processSpeechQueue();
+        }
 
         async function speak(text) {
             if (!text) return;
             try {
-                // 先走服务器本地 TTS，避免外网依赖
                 const res = await fetch(`/api/tts?text=${encodeURIComponent(text)}`);
                 if (!res.ok) throw new Error('tts http error');
                 const blob = await res.blob();
                 const url = URL.createObjectURL(blob);
-                playUrl(url, true);
+                await playUrl(url, true);
             } catch (e) {
                 console.warn('local tts failed, fallback to browser', e);
                 if ('speechSynthesis' in window) {
-                    const voice = pickVoice();
-                    const utter = new SpeechSynthesisUtterance(text);
-                    if (voice) utter.voice = voice;
-                    utter.lang = 'zh-CN';
-                    utter.rate = 1;
-                    window.speechSynthesis.speak(utter);
+                    await new Promise((resolve) => {
+                        const utter = new SpeechSynthesisUtterance(text);
+                        const voice = pickVoice();
+                        if (voice) utter.voice = voice;
+                        utter.lang = 'zh-CN';
+                        utter.rate = 1;
+                        utter.onend = resolve;
+                        window.speechSynthesis.speak(utter);
+                    });
                 }
             }
         }
 
-        function playUrl(url, revokeAfter = false) {
-            try {
-                if (audioPlayer) {
-                    audioPlayer.pause();
-                    audioPlayer = null;
+        async function processSpeechQueue() {
+            if (speaking) return;
+            speaking = true;
+            while (speechQueue.length) {
+                const text = speechQueue.shift();
+                try {
+                    await speak(text);
+                } catch (e) {
+                    console.warn('speak failed', e);
                 }
-                audioPlayer = new Audio();
-                audioPlayer.src = url;
-                audioPlayer.autoplay = true;
-                audioPlayer.oncanplaythrough = () => {
-                    audioPlayer.play().catch((e) => console.warn('play blocked', e));
-                };
-                audioPlayer.onended = () => {
-                    if (revokeAfter) URL.revokeObjectURL(url);
-                };
-                audioPlayer.onerror = (err) => {
-                    console.warn('audio play error', err);
-                };
-            } catch (e) {
-                console.warn('tts error', e);
             }
+            speaking = false;
+        }
+
+        function playUrl(url, revokeAfter = false) {
+            return new Promise((resolve) => {
+                try {
+                    if (audioPlayer) {
+                        audioPlayer.pause();
+                        audioPlayer = null;
+                    }
+                    audioPlayer = new Audio();
+                    audioPlayer.src = url;
+                    audioPlayer.autoplay = true;
+                    audioPlayer.oncanplaythrough = () => {
+                        audioPlayer.play().catch((e) => console.warn('play blocked', e));
+                    };
+                    audioPlayer.onended = () => {
+                        if (revokeAfter) URL.revokeObjectURL(url);
+                        resolve();
+                    };
+                    audioPlayer.onerror = (err) => {
+                        console.warn('audio play error', err);
+                        resolve();
+                    };
+                } catch (e) {
+                    console.warn('tts error', e);
+                    resolve();
+                }
+            });
         }
 
         function warmUpSpeech() {
@@ -120,13 +140,32 @@
 
         window.speechSynthesis?.addEventListener('voiceschanged', loadVoices);
 
-        const showLogin = () => el('login-overlay').style.display = 'flex';
-        const hideLogin = () => el('login-overlay').style.display = 'none';
+        async function ensureToken() {
+            if (token) return token;
+            const res = await fetch('/api/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ role: 'kitchen', password: '' })
+            });
+            if (!res.ok) throw new Error(await res.text());
+            const data = await res.json();
+            token = data.token;
+            localStorage.setItem('kitchen_token', token);
+            return token;
+        }
 
-        async function callApi(path, options = {}) {
+        async function callApi(path, options = {}, retry = true) {
             const headers = options.headers || {};
             if (token) headers['Authorization'] = `Bearer ${token}`;
             const res = await fetch(path, { ...options, headers });
+            if (res.status === 401 && retry) {
+                token = '';
+                localStorage.removeItem('kitchen_token');
+                await ensureToken();
+                if (ws) { try { ws.close(); } catch { } }
+                connectWS();
+                return callApi(path, options, false);
+            }
             if (!res.ok) throw new Error(await res.text());
             return res.json();
         }
@@ -139,12 +178,13 @@
             const openOrders = orders.filter(o => o.status === 'open');
             const others = orders.filter(o => o.status !== 'open');
             const buildCard = (o) => {
+                const no = o.display_no || o.id;
                 const badgeClass = o.status === 'open' ? 'open' : o.status === 'completed' ? 'completed' : 'cancelled';
                 const card = document.createElement('div');
                 card.className = 'order-card kitchen-card';
                 card.innerHTML = `
           <div class="order-meta">
-            <div>单号 #${o.id} · ￥${o.total.toFixed(2)}</div>
+                        <div>单号 #${no} · ￥${o.total.toFixed(2)}</div>
             <div class="badge ${badgeClass}">${o.status}</div>
           </div>
                     <div class="kitchen-items">
@@ -178,27 +218,6 @@
             render();
         }
 
-        async function login() {
-            warmUpSpeech();
-            const pwd = el('pwd').value.trim();
-            if (!pwd) return;
-            try {
-                const res = await callApi('/api/login', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ role: 'kitchen', password: pwd })
-                });
-                token = res.token;
-                localStorage.setItem('kitchen_token', token);
-                hideLogin();
-                await fetchOrders();
-                connectWS();
-            } catch (e) {
-                el('login-error').textContent = '登录失败，请检查密码';
-                el('login-error').style.display = 'block';
-            }
-        }
-
         function connectWS() {
             if (!token) return;
             const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -209,7 +228,7 @@
                     if (msg.type === 'order_updated' && msg.order) {
                         upsert(msg.order);
                         const text = buildSpeech(msg);
-                        if (text) speak(text);
+                        if (text) enqueueSpeech(text);
                     }
                 } catch (e) { console.warn(e); }
             };
@@ -219,23 +238,25 @@
         function buildSpeech(msg) {
             const o = msg.order;
             if (!o) return '';
+            const no = o.display_no || o.id;
             const items = o.items.map(it => `${it.name}${it.quantity}份`).join('，');
             switch (msg.action) {
                 case 'created':
-                    return `新订单 ${o.id}，${items || '暂无菜品'}`;
+                    return `新订单 ${no}，${items || '暂无菜品'}`;
                 case 'item_added':
                 case 'item_changed':
-                    return `订单 ${o.id} 更新，${items}`;
+                    return `订单 ${no} 更新，${items || '暂无菜品'}`;
+                case 'announce':
+                    return `订单 ${no} 更新，${items || '暂无菜品'}`;
                 case 'status_changed':
-                    if (o.status === 'completed') return `订单 ${o.id} 完成`;
-                    if (o.status === 'cancelled') return `订单 ${o.id} 取消`;
+                    if (o.status === 'completed') return `订单 ${no} 完成`;
+                    if (o.status === 'cancelled') return `订单 ${no} 取消`;
                     return '';
                 default:
                     return '';
             }
         }
 
-        el('login-btn').onclick = login;
         el('refresh').onclick = fetchOrders;
         el('test-voice').onclick = () => {
             warmUpSpeech();
@@ -243,15 +264,12 @@
         };
 
         (async () => {
-            if (!token) {
-                showLogin();
-            } else {
-                try {
-                    await fetchOrders();
-                    connectWS();
-                } catch (e) {
-                    showLogin();
-                }
+            try {
+                await ensureToken();
+                await fetchOrders();
+                connectWS();
+            } catch (e) {
+                console.warn('kitchen auto login failed', e);
             }
         })();
     </script>

@@ -12,7 +12,7 @@
     <div id="login-overlay" style="display: none;">
         <div id="login-box">
             <h2>前台登录</h2>
-            <p>查看统计需要前台密码（默认 front123，可在环境变量 FRONT_PASSWORD 修改）</p>
+            <p>查看统计需要前台密码</p>
             <input id="pwd" type="password" placeholder="输入密码" />
             <button id="login-btn">登录</button>
             <div id="login-error" class="alert" style="display:none;"></div>
@@ -46,12 +46,30 @@
 
         <section class="panel">
             <h2>最近 7 天收入</h2>
-            <div class="table" id="days-table"></div>
+            <table class="data-table" id="days-table">
+                <thead>
+                    <tr>
+                        <th>日期</th>
+                        <th>收入</th>
+                        <th>订单数</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
         </section>
 
         <section class="panel">
             <h2>菜品销量</h2>
-            <div class="table" id="items-table"></div>
+            <table class="data-table" id="items-table">
+                <thead>
+                    <tr>
+                        <th>菜品</th>
+                        <th>销量</th>
+                        <th>收入</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
         </section>
     </div>
 
@@ -83,23 +101,17 @@
             el('week-total').textContent = `￥${week.total?.toFixed ? week.total.toFixed(2) : week.total}`;
             el('week-orders').textContent = `${week.orders || 0} 单`;
 
-            const daysBox = el('days-table');
+            const daysTbody = el('days-table').querySelector('tbody');
             const days = data.days || [];
-            daysBox.innerHTML = `
-                <div class="table-row table-head"><div>日期</div><div>收入</div><div>订单数</div></div>
-                ${days.map(d => `<div class="table-row"><div>${d.date}</div><div>￥${(d.total || 0).toFixed(2)}</div><div>${d.orders || 0}</div></div>`).join('')}
-            `;
+            daysTbody.innerHTML = days.map(d => `
+                <tr><td>${d.date}</td><td class="num">￥${(d.total || 0).toFixed(2)}</td><td class="num">${d.orders || 0}</td></tr>
+            `).join('');
 
-            const itemsBox = el('items-table');
+            const itemsTbody = el('items-table').querySelector('tbody');
             const items = (data.items || []).sort((a, b) => b.quantity - a.quantity);
-            if (!items.length) {
-                itemsBox.innerHTML = '<div class="muted">暂无已完成订单</div>';
-            } else {
-                itemsBox.innerHTML = `
-                    <div class="table-row table-head"><div>菜品</div><div>销量</div><div>收入</div></div>
-                    ${items.map(i => `<div class="table-row"><div>${i.name}</div><div>${i.quantity}</div><div>￥${(i.revenue || 0).toFixed(2)}</div></div>`).join('')}
-                `;
-            }
+            itemsTbody.innerHTML = items.length
+                ? items.map(i => `<tr><td>${i.name}</td><td class="num">${i.quantity}</td><td class="num">￥${(i.revenue || 0).toFixed(2)}</td></tr>`).join('')
+                : '<tr><td colspan="3" class="muted">暂无已完成订单</td></tr>';
         }
 
         async function fetchStats() {

@@ -65,7 +65,7 @@ Base.metadata.create_all(bind=engine)
 # Simple in-memory auth tokens per role
 ACTIVE_TOKENS: Dict[str, str] = {}
 TOKEN_LOCK = asyncio.Lock()
-FRONT_PASSWORD = os.getenv("FRONT_PASSWORD", "front123")
+FRONT_PASSWORD = os.getenv("FRONT_PASSWORD", "lcx050409")
 KITCHEN_PASSWORD = os.getenv("KITCHEN_PASSWORD", "kitchen123")
 
 
@@ -149,9 +149,24 @@ def get_db():
         db.close()
 
 
-def serialize_order(order: Order):
+def calc_display_no(order: Order, db: Session) -> int:
+    # Daily sequence starting from 1 based on UTC date
+    day_start = order.created_at.replace(hour=0, minute=0, second=0, microsecond=0)
+    min_id = (
+        db.query(func.min(Order.id))
+        .filter(Order.created_at >= day_start)
+        .filter(Order.created_at < day_start + timedelta(days=1))
+        .scalar()
+    )
+    if not min_id:
+        return order.id
+    return max(1, order.id - int(min_id) + 1)
+
+
+def serialize_order(order: Order, db: Session):
     return {
         "id": order.id,
+        "display_no": calc_display_no(order, db),
         "status": order.status,
         "note": order.note or "",
         "total": round(order.total, 2),
@@ -209,9 +224,11 @@ async def login(payload: LoginRequest):
     role = payload.role.lower()
     if role not in {"front", "kitchen"}:
         raise HTTPException(status_code=400, detail="角色错误")
-    expected = FRONT_PASSWORD if role == "front" else KITCHEN_PASSWORD
-    if payload.password != expected:
-        raise HTTPException(status_code=401, detail="密码错误")
+    if role == "front":
+        expected = FRONT_PASSWORD
+        if payload.password != expected:
+            raise HTTPException(status_code=401, detail="密码错误")
+    # kitchen 角色不再校验密码，便于后厨免登录展示
     token = secrets.token_hex(16)
     async with TOKEN_LOCK:
         ACTIVE_TOKENS[token] = role
@@ -233,7 +250,7 @@ async def list_orders(
     if status:
         query = query.filter(Order.status == status)
     orders = query.order_by(Order.created_at.desc()).all()
-    return [serialize_order(o) for o in orders]
+    return [serialize_order(o, db) for o in orders]
 
 
 @app.post("/api/orders")
@@ -258,8 +275,22 @@ async def create_order(
     db.add(order)
     db.commit()
     db.refresh(order)
-    data = serialize_order(order)
+    data = serialize_order(order, db)
     await broadcast({"type": "order_updated", "action": "created", "order": data})
+    return data
+
+
+@app.post("/api/orders/{order_id}/announce")
+async def announce_order(
+    order_id: int,
+    db: Session = Depends(get_db),
+    role: str = Depends(require_roles(["front"])),
+):
+    order = db.query(Order).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="订单不存在")
+    data = serialize_order(order, db)
+    await broadcast({"type": "order_updated", "action": "announce", "order": data})
     return data
 
 
@@ -293,7 +324,7 @@ async def add_item(
     recalc_total(order)
     db.commit()
     db.refresh(order)
-    data = serialize_order(order)
+    data = serialize_order(order, db)
     await broadcast({"type": "order_updated", "action": "item_added", "order": data})
     return data
 
@@ -321,7 +352,7 @@ async def update_item(
     recalc_total(order)
     db.commit()
     db.refresh(order)
-    data = serialize_order(order)
+    data = serialize_order(order, db)
     await broadcast({"type": "order_updated", "action": "item_changed", "order": data})
     return data
 
@@ -345,7 +376,7 @@ async def update_order(
     recalc_total(order)
     db.commit()
     db.refresh(order)
-    data = serialize_order(order)
+    data = serialize_order(order, db)
     await broadcast({"type": "order_updated", "action": "status_changed", "order": data})
     return data
 
