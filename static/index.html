@@ -49,6 +49,11 @@
                 </div>
                 <div id="draft-items" class="draft-items muted">还没有菜品，先在上面点菜再提交</div>
             </div>
+            <div class="flag-row" id="flag-row">
+                <span class="flag-label">常用选项：</span>
+                <button class="btn-toggle" data-flag="pack" type="button">打包</button>
+                <button class="btn-toggle" data-flag="noSugar" type="button">不加糖</button>
+            </div>
             <div style="margin-top: 12px;">
                 <textarea id="note" placeholder="备注（可选，草稿时将随提交一起带上）"></textarea>
             </div>
@@ -65,7 +70,9 @@
         let orders = [];
         let menu = [];
         let ws = null;
-        let draft = { items: {}, note: '' };
+        const MAX_HISTORY = 10;
+        const FLAG_LABELS = { pack: '打包', noSugar: '不加糖' };
+        let draft = { items: {}, note: '', flags: { pack: false, noSugar: false } };
 
         const el = (id) => document.getElementById(id);
 
@@ -79,6 +86,36 @@
                 minute: '2-digit',
                 hour12: false
             });
+        };
+
+        const sortOrdersByTime = (list) => [...list].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+        const trimOrders = (list) => {
+            const sorted = sortOrdersByTime(list);
+            const openOrders = sorted.filter(o => o.status === 'open');
+            const historySlice = sorted.filter(o => o.status !== 'open').slice(0, MAX_HISTORY);
+            return [...openOrders, ...historySlice];
+        };
+
+        const selectedFlags = () => Object.entries(draft.flags)
+            .filter(([, v]) => v)
+            .map(([k]) => FLAG_LABELS[k]);
+
+        const renderFlags = () => {
+            const buttons = document.querySelectorAll('[data-flag]');
+            buttons.forEach(btn => {
+                const flag = btn.dataset.flag;
+                const active = !!draft.flags[flag];
+                btn.classList.toggle('active', active);
+            });
+        };
+
+        const composeNote = () => {
+            const flagText = selectedFlags();
+            const noteText = (draft.note || '').trim();
+            const parts = [];
+            if (flagText.length) parts.push(flagText.join('，'));
+            if (noteText) parts.push(noteText);
+            return parts.join('；');
         };
 
         const showLogin = () => el('login-overlay').style.display = 'flex';
@@ -99,14 +136,16 @@
         function upsertOrder(order) {
             const idx = orders.findIndex((o) => o.id === order.id);
             if (idx >= 0) orders[idx] = order; else orders.unshift(order);
+            orders = trimOrders(orders);
             renderOrders();
         }
 
         function renderOrders() {
             const list = el('order-list');
             list.innerHTML = '';
-            const openOrders = orders.filter(o => o.status === 'open');
-            const history = orders.filter(o => o.status !== 'open');
+            const sorted = sortOrdersByTime(orders);
+            const openOrders = sorted.filter(o => o.status === 'open');
+            const history = sorted.filter(o => o.status !== 'open').slice(0, MAX_HISTORY);
 
             const buildCard = (o) => {
                 const card = document.createElement('div');
@@ -147,7 +186,7 @@
             if (history.length) {
                 const wrap = document.createElement('details');
                 wrap.className = 'history';
-                wrap.innerHTML = `<summary>已完成/取消 (${history.length})</summary>`;
+                wrap.innerHTML = `<summary>已完成/取消（仅显示最近10单）</summary>`;
                 history.forEach(o => wrap.appendChild(buildCard(o)));
                 list.appendChild(wrap);
             }
@@ -171,6 +210,7 @@
         }
 
         function renderDraft() {
+            renderFlags();
             const items = Object.entries(draft.items);
             const box = el('draft-items');
             const total = items.reduce((s, [, q]) => s + q, 0);
@@ -205,7 +245,8 @@
         }
 
         async function fetchOrders() {
-            orders = await callApi('/api/orders');
+            const data = await callApi('/api/orders?limit=300');
+            orders = trimOrders(data);
             renderOrders();
         }
 
@@ -281,13 +322,13 @@
                 alert('请先选菜再提交');
                 return;
             }
-            const payload = { note: draft.note, items };
+            const payload = { note: composeNote(), items };
             const res = await callApi('/api/orders', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
-            draft = { items: {}, note: '' };
+            draft = { items: {}, note: '', flags: { pack: false, noSugar: false } };
             el('note').value = '';
             upsertOrder(res);
             renderDraft();
@@ -295,7 +336,7 @@
         }
 
         function clearDraft() {
-            draft = { items: {}, note: '' };
+            draft = { items: {}, note: '', flags: { pack: false, noSugar: false } };
             el('note').value = '';
             renderDraft();
             renderMenu();
@@ -316,9 +357,18 @@
             ws.onclose = () => setTimeout(connectWS, 3000);
         }
 
+        renderFlags();
+
         el('login-btn').onclick = login;
         el('submit-order').onclick = submitDraft;
         el('clear-draft').onclick = clearDraft;
+        el('flag-row').addEventListener('click', (e) => {
+            const btn = e.target.closest('[data-flag]');
+            if (!btn) return;
+            const flag = btn.dataset.flag;
+            draft.flags[flag] = !draft.flags[flag];
+            renderFlags();
+        });
         el('open-stats').onclick = () => { window.location.href = '/stats'; };
         el('refresh').onclick = () => { fetchOrders(); fetchStats(); };
 

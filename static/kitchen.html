@@ -22,7 +22,7 @@
         <section class="panel">
             <h2>待做菜品</h2>
             <div id="orders-open" class="order-list kitchen-grid"></div>
-            <h2 class="sub-title">已完成 / 取消</h2>
+            <h2 class="sub-title">已完成 / 取消（仅显示最近10单）</h2>
             <div id="orders-done" class="order-list kitchen-grid"></div>
         </section>
     </div>
@@ -34,6 +34,7 @@
     <script>
         let token = localStorage.getItem('kitchen_token') || '';
         let orders = [];
+        const MAX_HISTORY = 10;
         let ws = null;
         let voiceReady = false;
         let cachedVoices = [];
@@ -170,13 +171,22 @@
             return res.json();
         }
 
+        const sortOrdersByTime = (list) => [...list].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+        const trimOrders = (list) => {
+            const sorted = sortOrdersByTime(list);
+            const openOrders = sorted.filter(o => o.status === 'open');
+            const doneSlice = sorted.filter(o => o.status !== 'open').slice(0, MAX_HISTORY);
+            return [...openOrders, ...doneSlice];
+        };
+
         function render() {
             const openBox = el('orders-open');
             const doneBox = el('orders-done');
             openBox.innerHTML = '';
             doneBox.innerHTML = '';
-            const openOrders = orders.filter(o => o.status === 'open');
-            const others = orders.filter(o => o.status !== 'open');
+            const sorted = sortOrdersByTime(orders);
+            const openOrders = sorted.filter(o => o.status === 'open');
+            const others = sorted.filter(o => o.status !== 'open').slice(0, MAX_HISTORY);
             const buildCard = (o) => {
                 const no = o.display_no || o.id;
                 const badgeClass = o.status === 'open' ? 'open' : o.status === 'completed' ? 'completed' : 'cancelled';
@@ -210,11 +220,13 @@
         function upsert(order) {
             const idx = orders.findIndex(o => o.id === order.id);
             if (idx >= 0) orders[idx] = order; else orders.unshift(order);
+            orders = trimOrders(orders);
             render();
         }
 
         async function fetchOrders() {
-            orders = await callApi('/api/orders');
+            const data = await callApi('/api/orders?limit=300');
+            orders = trimOrders(data);
             render();
         }
 
@@ -240,11 +252,13 @@
             if (!o) return '';
             const no = o.display_no || o.id;
             const items = o.items.map(it => `${it.name}${it.quantity}份`).join('，');
+            const note = (o.note || '').trim();
+            const notePart = note ? `，${note}` : '';
             switch (msg.action) {
                 case 'created':
-                    return `新订单 ${no}，${items || '暂无菜品'}`;
+                    return `新订单 ${no}${notePart}，${items || '暂无菜品'}`;
                 case 'announce':
-                    return `订单 ${no} 更新，${items || '暂无菜品'}`;
+                    return `订单 ${no} 更新${notePart}，${items || '暂无菜品'}`;
                 case 'status_changed':
                     if (o.status === 'completed') return `订单 ${no} 完成`;
                     if (o.status === 'cancelled') return `订单 ${no} 取消`;

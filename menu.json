@@ -1,10 +1,5 @@
 [
     {
-        "key": "dabao",
-        "name": "打包",
-        "price": 0.0
-    },
-    {
         "key": "guantangbao",
         "name": "灌汤包",
         "price": 7.0

@@ -249,13 +249,20 @@ async def get_menu():
 @app.get("/api/orders")
 async def list_orders(
     status: Optional[str] = None,
+    limit: int = 200,
     db: Session = Depends(get_db),
     role: str = Depends(require_roles(["front", "kitchen"])),
 ):
+    # Limit the number of returned orders to avoid rendering overload on the frontends
+    safe_limit = max(1, min(int(limit or 200), 1000))
+
     query = db.query(Order)
     if status:
+        if status not in {"open", "completed", "cancelled"}:
+            raise HTTPException(status_code=400, detail="状态错误")
         query = query.filter(Order.status == status)
-    orders = query.order_by(Order.created_at.desc()).all()
+
+    orders = query.order_by(Order.created_at.desc()).limit(safe_limit).all()
     return [serialize_order(o, db) for o in orders]
 
 
