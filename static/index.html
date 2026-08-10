@@ -53,6 +53,8 @@
                 <span class="flag-label">常用选项：</span>
                 <button class="btn-toggle" data-flag="pack" type="button">打包</button>
                 <button class="btn-toggle" data-flag="noSugar" type="button">不加糖</button>
+                <button class="btn-toggle" data-flag="noCilantro" type="button">不加香菜</button>
+                <button class="btn-toggle" data-flag="noPepper" type="button">不加胡椒</button>
             </div>
             <div style="margin-top: 12px;">
                 <textarea id="note" placeholder="备注（可选，草稿时将随提交一起带上）"></textarea>
@@ -71,8 +73,8 @@
         let menu = [];
         let ws = null;
         const MAX_HISTORY = 10;
-        const FLAG_LABELS = { pack: '打包', noSugar: '不加糖' };
-        let draft = { items: {}, note: '', flags: { pack: false, noSugar: false } };
+        const FLAG_LABELS = { pack: '打包', noSugar: '不加糖', noCilantro: '不加香菜', noPepper: '不加胡椒' };
+        let draft = { items: {}, note: '', flags: { pack: false, noSugar: false, noCilantro: false, noPepper: false } };
 
         const el = (id) => document.getElementById(id);
 
@@ -328,7 +330,7 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
-            draft = { items: {}, note: '', flags: { pack: false, noSugar: false } };
+            draft = { items: {}, note: '', flags: { pack: false, noSugar: false, noCilantro: false, noPepper: false } };
             el('note').value = '';
             upsertOrder(res);
             renderDraft();
@@ -336,7 +338,7 @@
         }
 
         function clearDraft() {
-            draft = { items: {}, note: '', flags: { pack: false, noSugar: false } };
+            draft = { items: {}, note: '', flags: { pack: false, noSugar: false, noCilantro: false, noPepper: false } };
             el('note').value = '';
             renderDraft();
             renderMenu();

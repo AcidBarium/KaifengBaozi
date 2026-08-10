@@ -48,5 +48,10 @@
         "key": "jianjidan",
         "name": "煎鸡蛋",
         "price": 1.5
+    },
+    {
+        "key": "baozibanfen",
+        "name": "半份包子",
+        "price": 4
     }
 ]
