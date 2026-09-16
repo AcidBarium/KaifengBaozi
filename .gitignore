@@ -21,6 +21,9 @@ wheels/
 *.egg
 MANIFEST
 
+# Generated voice clips
+voice/
+
 # Database
 *.db
 *.sqlite3
@@ -80,3 +83,6 @@ instance/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+# Office temp files
+~$*

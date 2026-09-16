@@ -26,7 +26,7 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
   - 实时同步，7天收入汇总。支持平板触控，大按钮。
 - 后厨：
   - 登录后自动拉取订单并通过 WebSocket 实时更新。
-  - 新订单或修改自动语音播报（浏览器需支持 SpeechSynthesis）。
+  - 新订单或修改自动语音播报：后端用 Microsoft Edge TTS（`edge-tts`，无需 API Key）合成，浏览器 SpeechSynthesis 作为兜底。
   - 无需额外操作，仅查看。
 
 ## 目录

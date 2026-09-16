@@ -7,7 +7,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import httpx
+import edge_tts
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
@@ -21,11 +21,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "data.db"
 MENU_PATH = BASE_DIR / "menu.json"
 
-TTS_API_URL = os.getenv("TTS_API_URL", "https://tts.wangwangit.com/v1/audio/speech")
+# 语音播报使用 Microsoft Edge TTS（无需 API Key）
 TTS_DEFAULT_VOICE = os.getenv("TTS_VOICE", "zh-CN-XiaoxiaoNeural")
-TTS_SPEED = float(os.getenv("TTS_SPEED", "1.0"))
-TTS_PITCH = os.getenv("TTS_PITCH", "0")
-TTS_STYLE = os.getenv("TTS_STYLE", "general")
+TTS_RATE = os.getenv("TTS_RATE", "+0%")
+TTS_VOLUME = os.getenv("TTS_VOLUME", "+0%")
+TTS_PITCH = os.getenv("TTS_PITCH", "+0Hz")
 
 DATABASE_URL = f"sqlite:///{DB_PATH}"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -518,6 +518,24 @@ async def stats_page():
 
 
 
+async def synthesize_speech(text: str, voice: str) -> bytes:
+    """用 Microsoft Edge TTS 合成语音，返回 mp3 字节。"""
+    communicate = edge_tts.Communicate(
+        text,
+        voice,
+        rate=TTS_RATE,
+        volume=TTS_VOLUME,
+        pitch=TTS_PITCH,
+    )
+    buffer = bytearray()
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            buffer.extend(chunk["data"])
+    if not buffer:
+        raise RuntimeError("空音频")
+    return bytes(buffer)
+
+
 @app.get("/api/tts")
 async def tts(text: str, voice: Optional[str] = None):
     text = (text or "").strip()
@@ -526,25 +544,16 @@ async def tts(text: str, voice: Optional[str] = None):
     if len(text) > 240:
         raise HTTPException(status_code=400, detail="文本过长")
 
-    payload = {
-        "input": text,
-        "voice": voice or TTS_DEFAULT_VOICE,
-        "speed": TTS_SPEED,
-        "pitch": TTS_PITCH,
-        "style": TTS_STYLE,
-    }
-
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.post(TTS_API_URL, json=payload)
-    except httpx.RequestError:
-        raise HTTPException(status_code=502, detail="TTS 服务不可用")
+        audio = await synthesize_speech(text, voice or TTS_DEFAULT_VOICE)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"TTS 生成失败: {exc}")
 
-    if resp.status_code >= 400:
-        raise HTTPException(status_code=502, detail=f"TTS 生成失败: {resp.status_code}")
-
-    media_type = resp.headers.get("content-type", "audio/mpeg")
-    return StreamingResponse(BytesIO(resp.content), media_type=media_type, headers={"Cache-Control": "no-store"})
+    return StreamingResponse(
+        BytesIO(audio),
+        media_type="audio/mpeg",
+        headers={"Cache-Control": "no-store"},
+    )
 
 if __name__ == "__main__":
     import uvicorn
