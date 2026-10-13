@@ -9,9 +9,11 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 try:  # 以 `uvicorn backend.main:app` 方式导入
-    from .tts_endpoint import synthesize_speech
+    from . import tts_phrases
 except ImportError:  # 直接 `python backend/main.py` 运行
-    from tts_endpoint import synthesize_speech
+    import tts_phrases
+
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,9 +31,12 @@ MENU_PATH = BASE_DIR / "menu.json"
 logger = logging.getLogger("uvicorn.error")
 
 # 语音播报使用 Microsoft Edge TTS（无需 API Key）。
-# 具体合成、接入点切换、重试与缓存见 backend/tts_endpoint.py，
-# TTS_RATE / TTS_VOLUME / TTS_PITCH 由该模块从同名环境变量读取。
+# 具体合成、接入点切换、重试与缓存见 backend/tts_endpoint.py；
+# 播报文案的分段拼接与前缀预生成见 backend/tts_phrases.py。
+# TTS_RATE / TTS_VOLUME / TTS_PITCH 由 tts_endpoint 从同名环境变量读取。
 TTS_DEFAULT_VOICE = os.getenv("TTS_VOICE", "zh-CN-XiaoxiaoNeural")
+# 开机后台补齐前缀（默认关，建议用 `python backend/tts_phrases.py prewarm` 手动跑一次）
+TTS_PREWARM = (os.getenv("TTS_PREWARM", "0") or "0") not in {"0", "false", "False"}
 
 DATABASE_URL = f"sqlite:///{DB_PATH}"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -139,7 +144,20 @@ class StatsResponse(BaseModel):
     orders: int
 
 
-app = FastAPI(title="Baozhidian Quick Order")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    prewarm_task: Optional[asyncio.Task] = None
+    if TTS_PREWARM:
+        logger.info("TTS 开机预生成已启用，后台补齐 1..%d 的播报前缀", tts_phrases.MAX_ORDER_NO)
+        prewarm_task = asyncio.create_task(tts_phrases.prewarm())
+    try:
+        yield
+    finally:
+        if prewarm_task and not prewarm_task.done():
+            prewarm_task.cancel()
+
+
+app = FastAPI(title="Baozhidian Quick Order", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -532,7 +550,8 @@ async def tts(text: str, voice: Optional[str] = None):
         raise HTTPException(status_code=400, detail="文本过长")
 
     try:
-        audio = await synthesize_speech(text, voice or TTS_DEFAULT_VOICE)
+        # 分段拼接优先（前缀已预生成时完全不联网），拆不开自动回退整句合成
+        audio = await tts_phrases.synthesize(text, voice or TTS_DEFAULT_VOICE)
     except Exception as exc:  # noqa: BLE001
         # 必须记日志：否则 journalctl 里只能看到 502，看不到真实原因
         logger.exception("TTS 生成失败 text=%r", text)

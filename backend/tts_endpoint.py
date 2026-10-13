@@ -50,7 +50,7 @@ from typing import Dict, List, Optional, Tuple
 import edge_tts
 import edge_tts.communicate as _communicate
 
-def _log() -> logging.Logger:
+def log() -> logging.Logger:
     """复用 uvicorn 已配置的 handler，日志才能出现在 journalctl 里。
 
     直接 getLogger("tts") 打出的内容不会进 uvicorn 的 handler（root logger 没配），
@@ -104,6 +104,8 @@ DEFAULT_PITCH = os.getenv("TTS_PITCH", "+0Hz")
 
 ATTEMPTS = max(1, _env_int("TTS_ATTEMPTS", 3))
 BACKOFF = max(0.0, _env_float("TTS_BACKOFF", 0.6))
+# 遇到 429 时额外多等的时间：限流状态下死磕只会把尝试次数烧光
+THROTTLE_BACKOFF = max(0.0, _env_float("TTS_THROTTLE_BACKOFF", 4.0))
 TIMEOUT = max(3.0, _env_float("TTS_TIMEOUT", 20))
 CONNECT_TIMEOUT = min(10, int(TIMEOUT))
 
@@ -162,16 +164,19 @@ async def _synthesize_uncached(text: str, voice: str, rate: str, volume: str, pi
                 audio = await asyncio.wait_for(
                     _synth_once(url, text, voice, rate, volume, pitch), timeout=TIMEOUT + 5
                 )
-                _log().info("TTS 成功: %s (第 %d 次尝试, %d 字节)", name, attempt, len(audio))
+                log().info("TTS 成功: %s (第 %d 次尝试, %d 字节)", name, attempt, len(audio))
                 return audio
             except Exception as exc:  # noqa: BLE001 - 逐个接入点降级
                 last_exc = exc
-                _log().warning(
+                log().warning(
                     "TTS 失败: %s 第 %d/%d 次尝试: %s: %s",
                     name, attempt, ATTEMPTS, type(exc).__name__, exc,
                 )
                 if attempt < ATTEMPTS:
                     delay = BACKOFF * (2 ** (attempt - 1)) + random.uniform(0, 0.3)
+                    if "429" in str(exc):
+                        # 被限流了：退避久一点，否则下一发还是 429，白白烧掉尝试次数
+                        delay += THROTTLE_BACKOFF
                     await asyncio.sleep(delay)
 
     raise RuntimeError(f"所有 TTS 接入点均失败，最后一次: {type(last_exc).__name__}: {last_exc}")
@@ -180,37 +185,47 @@ async def _synthesize_uncached(text: str, voice: str, rate: str, volume: str, pi
 # ── 磁盘缓存 ────────────────────────────────────────────────────────────
 
 
-def _cache_path(text: str, voice: str, rate: str, volume: str, pitch: str) -> Path:
-    raw = "\x1f".join([text, voice, rate, volume, pitch]).encode("utf-8")
-    return CACHE_DIR / f"{hashlib.sha256(raw).hexdigest()}.mp3"
+def cache_path(key: str, namespace: str = "") -> Path:
+    """缓存文件路径。
+
+    namespace 用来隔离不同用途的音频：整句合成走根目录，裁过静音的
+    拼接片段走 `segments/`，两者即使原文相同也不会互相覆盖。
+    """
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    base = CACHE_DIR / namespace if namespace else CACHE_DIR
+    return base / f"{digest}.mp3"
 
 
-def _cache_get(key: Path) -> Optional[bytes]:
+def load_cached(path: Path) -> Optional[bytes]:
     if CACHE_TTL <= 0:
         return None
     try:
-        stat = key.stat()
+        stat = path.stat()
     except OSError:
         return None
     if time.time() - stat.st_mtime > CACHE_TTL:
         return None
     try:
-        data = key.read_bytes()
+        data = path.read_bytes()
     except OSError:
         return None
     return data or None
 
 
-def _cache_put(key: Path, audio: bytes) -> None:
+def store_cached(path: Path, audio: bytes) -> None:
     if CACHE_TTL <= 0:
         return
     try:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = key.with_suffix(".mp3.tmp")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_bytes(audio)
-        tmp.replace(key)  # 原子落盘，避免半截文件被读到
+        tmp.replace(path)  # 原子落盘，避免半截文件被读到
     except OSError as exc:
-        _log().warning("TTS 缓存写入失败 %s: %s", key, exc)
+        log().warning("TTS 缓存写入失败 %s: %s", path, exc)
+
+
+def utterance_key(text: str, voice: str, rate: str, volume: str, pitch: str) -> str:
+    return "\x1f".join([text, voice, rate, volume, pitch])
 
 
 # ── 对外接口 ────────────────────────────────────────────────────────────
@@ -234,20 +249,20 @@ async def synthesize_speech(
     volume = volume or DEFAULT_VOLUME
     pitch = pitch or DEFAULT_PITCH
 
-    key = _cache_path(text, voice, rate, volume, pitch)
+    key = cache_path(utterance_key(text, voice, rate, volume, pitch))
     if use_cache:
-        hit = _cache_get(key)
+        hit = load_cached(key)
         if hit:
-            _log().debug("TTS 命中缓存: %s", text)
+            log().debug("TTS 命中缓存: %s", text)
             return hit
 
     async with _synth_lock:
         if use_cache:  # 等锁期间可能已被别的请求合成好
-            hit = _cache_get(key)
+            hit = load_cached(key)
             if hit:
                 return hit
         audio = await _synthesize_uncached(text, voice, rate, volume, pitch)
-        _cache_put(key, audio)
+        store_cached(key, audio)
         return audio
 
 

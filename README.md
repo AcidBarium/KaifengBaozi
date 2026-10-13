@@ -32,6 +32,7 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 ## 目录
 - `backend/main.py`：FastAPI 服务，SQLite 持久化，WebSocket 广播。
 - `backend/tts_endpoint.py`：Edge TTS 合成封装（接入点切换、重试、缓存）。
+- `backend/tts_phrases.py`：播报文案的分段拼接与前缀预生成。
 - `backend/check_tts.py`：TTS 自检脚本，排障时先跑它。
 - `static/index.html`：前台页面。
 - `static/kitchen.html`：后厨出餐屏。
@@ -56,7 +57,41 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 python backend/check_tts.py
 ```
 
-可调环境变量（都有默认值，不配也能跑）：
+### 分段拼接 + 前缀预生成
+
+播报文案里带单号（`订单 67 完成` / `订单 68 完成`），只按整句缓存命中率≈0。
+`backend/tts_phrases.py` 把文案拆成片段：
+
+```
+新订单 68，打包，鸡蛋汤1份，豆浆1份
+└─前缀─┘  └备注┘ └─菜品片段─┘ └片段┘
+```
+
+* **前缀**（`订单 {号} 完成` / `新订单 {号}，` / `订单 {号} 更新，` / `订单 {号} 取消`）
+  按当日单号范围**提前批量生成**；
+* **备注**、**菜名+份数**这类片段按需生成后缓存；
+* 之后绝大多数播报都是本地拼接、完全不联网。
+
+拆解规则与 `static/kitchen.html` 的 `buildSpeech()` 一一对应；**拆不出来的文案自动回退整句合成**，
+所以改前端文案不会把播报弄坏，最多是享受不到拼接优化。
+
+**Edge 会把短句补齐到约 1.87 秒（尾部 1.1~1.4 秒静音）**，所以片段必须按 MP3 帧边界裁掉多余静音，
+否则拼出来全是空拍（实测裸拼「订单+六十七+完成」要 5.6s，整句只要 2.1s）。裁剪两端各留一小段静音，
+让拼接点落在静音里。实测拼好的真实播报 5.47s，反而比整句的 5.78s 略短。
+
+先跑一次预生成（可重复执行，已存在的会跳过，中断了再跑就是续传）：
+
+```bash
+python backend/tts_phrases.py status              # 看缓存现状
+python backend/tts_phrases.py prewarm             # 生成 1..TTS_MAX_ORDER_NO 的前缀
+python backend/tts_phrases.py prewarm --max 25    # 只生成 1..25
+python backend/tts_phrases.py demo                # 拼两条真实播报，落盘到 /tmp 试听
+```
+
+预生成按**使用频率从高到低**排序（先 `订单 N 完成`，最后 `订单 N 取消`），
+默认范围 200 共 801 条，会持续一段时间（受 429 限流影响可能更久），建议打烊后跑或挂后台。
+
+### 环境变量
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
@@ -68,9 +103,20 @@ python backend/check_tts.py
 | `TTS_CACHE_DIR` | `<项目根>/tts-cache` | 音频缓存目录（需可写，已 gitignore） |
 | `TTS_CACHE_TTL` | `604800` | 缓存有效期（秒），设 `0` 关闭缓存 |
 | `TTS_ENDPOINT` | 空（auto） | 强制只用 `new` 或 `old` |
+| `TTS_COMPOSE` | `1` | 设 `0` 完全关闭分段拼接，回到整句合成 |
+| `TTS_MAX_ORDER_NO` | `200` | 预生成的单号上限（超过的仍按需合成并缓存） |
+| `TTS_PAUSE_MS` | `170` | 片段末尾保留的停顿（毫秒） |
+| `TTS_PREWARM` | `0` | 设 `1` 则开机在后台自动补齐前缀 |
+| `TTS_PREWARM_INTERVAL` | `0.3` | 预生成每条之间的间隔（秒），避免 429 |
 
 若 systemd 里开了 `ProtectSystem=strict` / `ReadOnlyPaths`，记得给缓存目录放行，
 或把 `TTS_CACHE_DIR` 指到 `/var/cache/kaifengbaozi`。
+
+### 注意
+
+* 分段拼接的音质**不如整句**：每个片段是独立朗读的，缺少整句的语调衔接。
+  想对比就 `python backend/tts_phrases.py demo` 拼一条，再和整句合成比一比。
+* `miniaudio` 只用于裁静音。装不上也能跑，只是片段会带上句间长静音（`TTS_COMPOSE=0` 可彻底关掉这一层）。
 
 ## 数据库位置
 - SQLite 文件：`data.db`（与项目根目录同级）。删除可清空数据。

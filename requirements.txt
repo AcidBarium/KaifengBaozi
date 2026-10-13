@@ -2,3 +2,7 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.1
 sqlalchemy==2.0.30
 edge-tts==7.2.8
+# 播报片段拼接要按帧裁掉多余静音（见 backend/tts_phrases.py）。
+# 纯 pip 安装、自带 C 库，不需要系统的 ffmpeg；
+# 装不上也不影响启动，只是片段会带上句间长静音。
+miniaudio==1.71
