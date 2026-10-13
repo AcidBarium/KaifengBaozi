@@ -32,7 +32,9 @@ def main() -> int:
 
     print("python:", sys.version.split()[0])
     print("尝试顺序:", " -> ".join(n for n, _ in tts_endpoint.endpoint_order()))
-    print("缓存目录:", tts_endpoint.CACHE_DIR, "(TTL %ds)" % tts_endpoint.CACHE_TTL)
+    ttl = "永久" if tts_endpoint.CACHE_TTL <= 0 else f"{tts_endpoint.CACHE_TTL}s"
+    enabled = "开启" if tts_endpoint.CACHE_ENABLED else "已停用"
+    print("缓存目录:", tts_endpoint.CACHE_DIR, f"(TTL {ttl}, {enabled})")
     print()
     print("── 逐接入点实测 ──")
     results = asyncio.run(tts_endpoint.probe_endpoints())

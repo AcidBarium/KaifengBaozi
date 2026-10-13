@@ -31,7 +31,8 @@ Microsoft 把 Edge Read Aloud 的**语音合成** WebSocket 从旧地址迁走�
     TTS_BACKOFF      首次退避秒数，指数增长（默认 0.6）
     TTS_TIMEOUT      单次合成总超时秒数（默认 20）
     TTS_CACHE_DIR    音频缓存目录（默认 <项目根>/tts-cache）
-    TTS_CACHE_TTL    缓存有效秒数（默认 604800 = 7 天，设 0 关闭缓存）
+    TTS_CACHE_TTL    缓存有效秒数（默认 0 = 永久保留；给秒数才按修改时间过期）
+    TTS_CACHE        设 0 完全停用缓存（读写都不走缓存）
     TTS_ENDPOINT     强制只用某个接入点：new / old（默认 auto：先 new 再 old）
 """
 
@@ -110,7 +111,12 @@ TIMEOUT = max(3.0, _env_float("TTS_TIMEOUT", 20))
 CONNECT_TIMEOUT = min(10, int(TIMEOUT))
 
 CACHE_DIR = Path(os.getenv("TTS_CACHE_DIR") or (Path(__file__).resolve().parent.parent / "tts-cache"))
-CACHE_TTL = _env_int("TTS_CACHE_TTL", 7 * 24 * 3600)
+# 默认永久保留：预生成的 801 条前缀、菜品和备注片段一旦生成就一直可用。
+# 缓存键里已经含发音人/语速/音量/音调，改了这些会算出全新文件名、旧文件自然不再被读，
+# 所以"换发音人"并不需要靠过期来实现；而总占用是有界的（几十 MB 量级）。
+# TTS_CACHE_TTL 给个秒数才会按文件修改时间过期；TTS_CACHE=0 则整个缓存停用。
+CACHE_ENABLED = (os.getenv("TTS_CACHE", "1") or "1") not in {"0", "false", "False"}
+CACHE_TTL = _env_int("TTS_CACHE_TTL", 0)  # <=0 表示不过期
 
 # 串行化合成：既避免并发下切换模块级 WSS_URL 的竞态，
 # 也天然压低请求频率，减少 429。
@@ -197,13 +203,13 @@ def cache_path(key: str, namespace: str = "") -> Path:
 
 
 def load_cached(path: Path) -> Optional[bytes]:
-    if CACHE_TTL <= 0:
+    if not CACHE_ENABLED:
         return None
     try:
         stat = path.stat()
     except OSError:
         return None
-    if time.time() - stat.st_mtime > CACHE_TTL:
+    if CACHE_TTL > 0 and time.time() - stat.st_mtime > CACHE_TTL:
         return None
     try:
         data = path.read_bytes()
@@ -213,7 +219,7 @@ def load_cached(path: Path) -> Optional[bytes]:
 
 
 def store_cached(path: Path, audio: bytes) -> None:
-    if CACHE_TTL <= 0:
+    if not CACHE_ENABLED:
         return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -262,7 +268,8 @@ async def synthesize_speech(
             if hit:
                 return hit
         audio = await _synthesize_uncached(text, voice, rate, volume, pitch)
-        store_cached(key, audio)
+        if use_cache:
+            store_cached(key, audio)
         return audio
 
 
