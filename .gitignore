@@ -24,6 +24,9 @@ MANIFEST
 # Generated voice clips
 voice/
 
+# Cached TTS audio (backend/tts_endpoint.py)
+tts-cache/
+
 # Database
 *.db
 *.sqlite3

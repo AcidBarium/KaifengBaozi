@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import secrets
 from datetime import datetime, timedelta
@@ -7,7 +8,11 @@ from io import BytesIO
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import edge_tts
+try:  # 以 `uvicorn backend.main:app` 方式导入
+    from .tts_endpoint import synthesize_speech
+except ImportError:  # 直接 `python backend/main.py` 运行
+    from tts_endpoint import synthesize_speech
+
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
@@ -21,11 +26,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "data.db"
 MENU_PATH = BASE_DIR / "menu.json"
 
-# 语音播报使用 Microsoft Edge TTS（无需 API Key）
+logger = logging.getLogger("uvicorn.error")
+
+# 语音播报使用 Microsoft Edge TTS（无需 API Key）。
+# 具体合成、接入点切换、重试与缓存见 backend/tts_endpoint.py，
+# TTS_RATE / TTS_VOLUME / TTS_PITCH 由该模块从同名环境变量读取。
 TTS_DEFAULT_VOICE = os.getenv("TTS_VOICE", "zh-CN-XiaoxiaoNeural")
-TTS_RATE = os.getenv("TTS_RATE", "+0%")
-TTS_VOLUME = os.getenv("TTS_VOLUME", "+0%")
-TTS_PITCH = os.getenv("TTS_PITCH", "+0Hz")
 
 DATABASE_URL = f"sqlite:///{DB_PATH}"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -517,25 +523,6 @@ async def stats_page():
     return FileResponse(str(BASE_DIR / "static" / "stats.html"))
 
 
-
-async def synthesize_speech(text: str, voice: str) -> bytes:
-    """用 Microsoft Edge TTS 合成语音，返回 mp3 字节。"""
-    communicate = edge_tts.Communicate(
-        text,
-        voice,
-        rate=TTS_RATE,
-        volume=TTS_VOLUME,
-        pitch=TTS_PITCH,
-    )
-    buffer = bytearray()
-    async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            buffer.extend(chunk["data"])
-    if not buffer:
-        raise RuntimeError("空音频")
-    return bytes(buffer)
-
-
 @app.get("/api/tts")
 async def tts(text: str, voice: Optional[str] = None):
     text = (text or "").strip()
@@ -547,6 +534,8 @@ async def tts(text: str, voice: Optional[str] = None):
     try:
         audio = await synthesize_speech(text, voice or TTS_DEFAULT_VOICE)
     except Exception as exc:  # noqa: BLE001
+        # 必须记日志：否则 journalctl 里只能看到 502，看不到真实原因
+        logger.exception("TTS 生成失败 text=%r", text)
         raise HTTPException(status_code=502, detail=f"TTS 生成失败: {exc}")
 
     return StreamingResponse(
@@ -554,6 +543,7 @@ async def tts(text: str, voice: Optional[str] = None):
         media_type="audio/mpeg",
         headers={"Cache-Control": "no-store"},
     )
+
 
 if __name__ == "__main__":
     import uvicorn
