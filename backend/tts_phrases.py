@@ -221,8 +221,12 @@ async def segment(text: str, voice: Optional[str] = None, force: bool = False) -
     return audio
 
 
-async def synthesize(text: str, voice: Optional[str] = None) -> bytes:
-    """播报入口：能拆就分段拼接，拆不开或失败就整句合成。"""
+async def synthesize_with_mode(text: str, voice: Optional[str] = None) -> Tuple[bytes, str]:
+    """同 synthesize()，但一起返回实际走的是哪条路："composed" / "whole"。
+
+    demo 靠它区分「真的是拼接出来的」和「拼接失败后回退整句」—— 否则拿整句的
+    效果去判断拼接音质，结论就反了。
+    """
     text = (text or "").strip()
     if not text:
         raise ValueError("缺少文本")
@@ -237,11 +241,17 @@ async def synthesize(text: str, voice: Optional[str] = None) -> bytes:
                     _tts.log().info(
                         "TTS 分段拼接: %d 段 %d 字节 -> %s", len(segments), len(joined), text
                     )
-                return joined
+                return joined, "composed"
             except Exception as exc:  # noqa: BLE001 - 分段失败不该让播报整体失败
                 _tts.log().warning("TTS 分段拼接失败，回退整句: %s: %s", type(exc).__name__, exc)
 
-    return await _tts.synthesize_speech(text, voice)
+    return await _tts.synthesize_speech(text, voice), "whole"
+
+
+async def synthesize(text: str, voice: Optional[str] = None) -> bytes:
+    """播报入口：能拆就分段拼接，拆不开或失败就整句合成。"""
+    audio, _ = await synthesize_with_mode(text, voice)
+    return audio
 
 
 # ── 预生成 ──────────────────────────────────────────────────────────────
@@ -359,23 +369,36 @@ def _main() -> int:
         print(f"完成: {result}")
         return 0 if not result["failed"] else 1
 
-    # demo：拼两条真实播报，落盘到 /tmp 供试听
+    # demo：拼几条真实播报，落盘到 /tmp 供试听
     import tempfile
     import time
 
     cases = [
         ("订单 68 完成", "整句预生成"),
-        ("新订单 68，打包，鸡蛋汤1份，豆浆1份，菜饼2份", "分段拼接"),
+        ("新订单 68，打包，鸡蛋汤1份，豆浆1份，菜饼2份", "前缀+备注+3个菜"),
         ("新订单 69，灌汤包1份", "前缀+单品"),
+        ("播报测试，欢迎光临", "固定句"),
     ]
     out_dir = Path(tempfile.gettempdir())
-    for text, kind in cases:
+    print("生成样片（首次运行需要现场合成，会慢一些）...\n")
+    fell_back = 0
+    for i, (text, desc) in enumerate(cases, 1):
         started = time.time()
-        audio = asyncio.run(synthesize(text))
+        audio, mode = asyncio.run(synthesize_with_mode(text))
         elapsed = time.time() - started
-        path = out_dir / f"demo_{abs(hash(text)) % 10000}_{kind}.mp3"
+        actual = "分段拼接" if mode == "composed" else "整句合成(回退)"
+        path = out_dir / f"tts_demo_{i}.mp3"
         path.write_bytes(audio)
-        print(f"  [{kind}] {len(audio):6}B {elapsed:5.2f}s  {text}\n      -> {path}")
+        print(f"  {i}. {text}    [{desc}]")
+        print(f"     {actual}  {len(audio)}B  {elapsed:.2f}s  -> {path}")
+        if mode != "composed":
+            fell_back += 1
+            print("     ⚠ 已回退成整句，不能用来判断拼接音质")
+    if fell_back:
+        print(
+            f"\n有 {fell_back} 条回退成了整句（多半是 429 限流）。"
+            "隔几分钟重跑本命令，确认真实的拼接效果再决定要不要 prewarm。"
+        )
     return 0
 
 
